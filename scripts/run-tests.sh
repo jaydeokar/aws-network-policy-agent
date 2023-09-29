@@ -12,6 +12,7 @@ source ${DIR}/lib/tests.sh
 
 : "${RUN_PERFORMANCE_TESTS:=false}"
 : "${RUN_CONFORMANCE_TESTS:=false}"
+: "${TEST_IMAGE_REPOSITORY:="registry.k8s.io"}"
 TEST_FAILED="false"
 
 cleanup() {
