@@ -22,3 +22,12 @@ else
 fi
 
 install_network_policy_helm
+
+echo "Check aws-node daemonset status"
+if kubectl rollout status ds/aws-node -n kube-system --timeout=300s; then
+    echo "aws-node daemonset rolled out successfully"
+else
+    kubectl get pods -l k8s-app=aws-node
+    echo "There was an error rolling out aws-node daemonset"
+    exit 1
+fi
