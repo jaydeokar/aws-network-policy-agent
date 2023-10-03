@@ -198,6 +198,20 @@ docker-buildx: setup-ebpf-sdk-override ## Build and push docker image for the ma
 	- docker buildx rm project-v3-builder
 	rm Dockerfile.cross
 
+
+.PHONY: multi-arch-build-and-push
+multi-arch-build-and-push: setup-ebpf-sdk-override ## Build and push docker image for the manager for cross-platform support
+
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
+	docker buildx build $(DOCKER_BUILD_FLAGS_NP_AGENT) \
+		-f Dockerfile.cross \
+		--platform "$(PLATFORMS)"\
+		--cache-from=type=gha \
+		--cache-to=type=gha,mode=max \
+		-t $(IMAGE):$(VERSION) \
+		--push \
+		.
+
 ##@ Deployment
 
 ifndef ignore-not-found
