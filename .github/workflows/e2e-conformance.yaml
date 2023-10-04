@@ -37,6 +37,7 @@ jobs:
       matrix:
         ip-family: [ IPv4, IPv6 ]
         # kubernetes-versions: ["1.25", "1.26", "1.27"]
+        # instance-type: ["t3.large", "t4g.large"]
     if: github.repository == 'aws/aws-network-policy-agent'
     runs-on: ubuntu-latest
     steps:
@@ -52,8 +53,9 @@ jobs:
       - name: Run e2e conformance test
         env:
           RUN_CONFORMANCE_TESTS: true
-          K8S_VERSION: 1.27
+          K8S_VERSION: 1.28
           IP_FAMILY: ${{ matrix.ip-family }}
+          INSTANCE_TYPE: t4g.large
           AWS_EKS_NODEAGENT_IMAGE: ${{ needs.build-image.outputs.AWS_EKS_NODEAGENT_IMAGE }}
         run: |
           ./scripts/run-tests.sh

@@ -9,9 +9,9 @@ source ${DIR}/lib/cluster.sh
 source ${DIR}/lib/network-policy.sh
 source ${DIR}/lib/tests.sh
 
-: "${RUN_PERFORMANCE_TESTS:=false}"
-: "${RUN_CONFORMANCE_TESTS:=false}"
-: "${AWS_EKS_NODEAGENT_IMAGE:=""}"
+RUN_PERFORMANCE_TESTS="${RUN_PERFORMANCE_TESTS:=false}"
+RUN_CONFORMANCE_TESTS="${RUN_CONFORMANCE_TESTS:=false}"
+AWS_EKS_NODEAGENT_IMAGE="${AWS_EKS_NODEAGENT_IMAGE:=""}"
 TEST_FAILED="false"
 
 cleanup() {
