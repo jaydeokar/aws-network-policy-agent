@@ -28,6 +28,7 @@ spec:
             - ./cyclonus
             - generate
             - --retries=2
+            - --verbosity=debug
             ${IMAGE_REPOSITORY_PARAMETER}
 EOF
 }
@@ -41,8 +42,8 @@ function run_cyclonus_tests(){
     generate_manifest_and_apply
 
     echo "Executing cyclonus suite"
-    kubectl wait --for=condition=complete --timeout=300m -n netpol job.batch/cyclonus || echo "Job timed out after 4 hrs"
-    kubectl logs -n netpol job/cyclonus > ${DIR}/results.log
+    kubectl wait --for=condition=ready -n netpol -l job-name=cyclonus
+    kubectl logs -n netpol job/cyclonus --follow > ${DIR}/results.log || echo "Job timed out after 4 hrs"
 
     kubectl get pods -A -owide
 
