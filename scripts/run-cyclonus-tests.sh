@@ -10,6 +10,9 @@
 # ENDPOINT: Optional
 # DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE: false
 # NP_CONTROLLER_ENDPOINT_CHUNK_SIZE: Optional
+# AWS_EKS_NODEAGENT: Optional
+# AWS_CNI_IMAGE: Optional
+# AWS_CNI_INIT_IMAGE: Optional
 
 set -euoE pipefail
 DIR=$(cd "$(dirname "$0")"; pwd)
@@ -29,6 +32,10 @@ source ${DIR}/lib/tests.sh
 : "${PROD_IMAGE_REGISTRY:=""}"
 : "${DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE:="false"}"
 : "${NP_CONTROLLER_ENDPOINT_CHUNK_SIZE=""}}"
+: "${AWS_CNI_IMAGE=""}"
+: "${AWS_CNI_INIT_IMAGE=""}"
+: "${AWS_EKS_NODEAGENT=""}"
+
 TEST_FAILED="false"
 
 if [[ ! -z $ENDPOINT ]]; then
@@ -81,6 +88,33 @@ fi
 run_cyclonus_tests
 
 check_path_cleanup
+
+if [[ $ENABLE_STRICT_MODE_TEST == "true" ]]; then
+    echo "Running strict mode test"
+    if [[ ! -z $AWS_EKS_NODEAGENT ]]; then
+        echo "Replacing Node Agent Image in aws-vpc-cni helm chart with $AWS_EKS_NODEAGENT"
+        HELM_EXTRA_ARGS+=" --set image.override=$AWS_EKS_NODEAGENT"  
+    fi
+
+    if [[ ! -z $AWS_CNI_IMAGE ]]; then
+        echo "Replacing CNI Image in aws-vpc-cni helm chart with $AWS_CNI_IMAGE"
+        HELM_EXTRA_ARGS+=" --set nodeAgent.image.override=$AWS_CNI_IMAGE"  
+    fi
+
+    if [[ ! -z $AWS_CNI_INIT_IMAGE ]]; then
+        echo "Replacing CNI Init Image in aws-vpc-cni helm chart with $AWS_CNI_INIT_IMAGE"
+        HELM_EXTRA_ARGS+=" --set init.image.override=$AWS_CNI_INIT_IMAGE"
+    fi
+
+    install_network_policy_helm
+
+    kubectl -n kube-system patch daemonset aws-node \
+        --type=json -p='[{"op": "add", "path": "/spec/template/spec/containers/1/args/-", "value": "--enable-strict-mode=true"}]'
+
+    pushd ${DIR}/../test/integration/strict
+        CGO_ENABLED=0 ginkgo -v -timeout 15m --no-color --fail-on-pending -- --cluster-kubeconfig="$KUBECONFIG" --cluster-name="$CLUSTER_NAME" --test-image-registry="registry.k8s.io/e2e-test-images" || TEST_FAILED="true"
+    popd
+fi
 
 if [[ $TEST_FAILED == "true" ]]; then
     echo "Test run failed"
