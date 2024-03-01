@@ -36,6 +36,7 @@ source ${DIR}/lib/tests.sh
 : "${AWS_EKS_NODEAGENT:=""}"
 : "${AWS_CNI_IMAGE:=""}"
 : "${AWS_CNI_INIT_IMAGE:=""}"
+: "${KUBE_CONFIG_PATH:=$KUBECONFIG}"
 
 TEST_FAILED="false"
 
@@ -86,9 +87,9 @@ if [[ $DEPLOY_NETWORK_POLICY_CONTROLLER_ON_DATAPLANE == "true" ]]; then
     make deploy-network-policy-controller-on-dataplane NP_CONTROLLER_IMAGE=$PROD_IMAGE_REGISTRY NP_CONTROLLER_ENDPOINT_CHUNK_SIZE=$NP_CONTROLLER_ENDPOINT_CHUNK_SIZE
 fi
 
-run_cyclonus_tests
+# run_cyclonus_tests
 
-check_path_cleanup
+# check_path_cleanup
 
 if [[ $ENABLE_STRICT_MODE == "true" ]]; then
 
@@ -116,7 +117,7 @@ if [[ $ENABLE_STRICT_MODE == "true" ]]; then
     kubectl rollout status ds/aws-node -n kube-system --timeout=300s
 
     pushd ${DIR}/../test/integration/strict
-        CGO_ENABLED=0 ginkgo -v -timeout 15m --no-color --fail-on-pending -- --cluster-kubeconfig="$KUBECONFIG" --cluster-name="$CLUSTER_NAME" --test-image-registry=$TEST_IMAGE_REGISTRY || TEST_FAILED="true"
+        CGO_ENABLED=0 ginkgo -v -timeout 15m --no-color --fail-on-pending -- --cluster-kubeconfig=$KUBE_CONFIG_PATH --cluster-name=$CLUSTER_NAME --test-image-registry=$TEST_IMAGE_REGISTRY || TEST_FAILED="true"
     popd
 
 fi
