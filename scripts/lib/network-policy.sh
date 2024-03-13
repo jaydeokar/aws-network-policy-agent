@@ -65,7 +65,7 @@ function install_network_policy_mao() {
   aws eks create-addon \
     --cluster-name $CLUSTER_NAME \
     --addon-name $ADDON_NAME \
-    --configuration-value '{"enableNetworkPolicy": "true"}' \
+    --configuration-value '{"enableNetworkPolicy": "true", "env": {"NETWORK_POLICY_ENFORCING_MODE": "strict"}}' \
     --resolve-conflicts OVERWRITE \
     --addon-version $addon_version \
     --region $REGION $ENDPOINT_FLAG $SA_ROLE_ARN_ARG
