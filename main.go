@@ -17,9 +17,14 @@ limitations under the License.
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
 
+	configrpc "github.com/aws/aws-network-policy-agent/pkg/configrpc"
 	"github.com/aws/aws-network-policy-agent/pkg/rpc"
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/aws/aws-network-policy-agent/pkg/logger"
 
@@ -82,6 +87,8 @@ func main() {
 		setupLog.Error(err, "unable to create controller manager")
 		os.Exit(1)
 	}
+	// Add a flag which disables this
+	loadArgs(ctrlConfig)
 
 	ctx := ctrl.SetupSignalHandler()
 	policyEndpointController, err := controllers.NewPolicyEndpointsReconciler(mgr.GetClient(),
@@ -135,4 +142,17 @@ func loadControllerConfig() (config.ControllerConfig, error) {
 func getLoggerWithLogLevel(logLevel string, logFilePath string) (logr.Logger, error) {
 	ctrlLogger := logger.New(logLevel, logFilePath)
 	return zapr.NewLogger(ctrlLogger), nil
+}
+
+func loadArgs(ctrlConfig config.ControllerConfig) {
+	conn, err := grpc.Dial("localhost:50052", grpc.WithInsecure(), grpc.WithBlock())
+	if err != nil {
+		fmt.Print(err)
+	}
+
+	client1 := configrpc.NewConfigServerBackendClient(conn)
+	resp, err := client1.GetNetworkPolicyAgentConfigs(context.TODO(), &emptypb.Empty{})
+	if resp.ConntrackCleanupInterval > 0 && resp.ConntrackCleanupInterval < 600 {
+		ctrlConfig.ConntrackCacheCleanupPeriod = int(resp.ConntrackCleanupInterval)
+	}
 }
