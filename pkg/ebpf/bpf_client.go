@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,7 +45,7 @@ var (
 	AWS_EVENTS_MAP                             = "policy_events"
 	EKS_CLI_BINARY                             = "aws-eks-na-cli"
 	EKS_V6_CLI_BINARY                          = "aws-eks-na-cli-v6"
-	hostBinaryPath                             = "/host/opt/cni/bin/"
+	hostBinaryPath                             = "/opt/cni/bin/"
 	IPv4_HOST_MASK                             = "/32"
 	IPv6_HOST_MASK                             = "/128"
 	CONNTRACK_MAP_PIN_PATH                     = "/sys/fs/bpf/globals/aws/maps/global_aws_conntrack_map"
@@ -109,8 +110,9 @@ type EbpfFirewallRules struct {
 }
 
 func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePolicyEventLogs, enableCloudWatchLogs bool,
-	enableIPv6 bool, conntrackTTL int) (*bpfClient, error) {
+	enableIPv6 bool, conntrackTTL int, conntrackTableSize int, runAsSystemProcess bool) (*bpfClient, error) {
 	var conntrackMap goebpfmaps.BpfMap
+	var ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired bool
 
 	ebpfClient := &bpfClient{
 		policyEndpointeBPFContext: policyEndpointeBPFContext,
@@ -145,21 +147,27 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 	}
 
 	//Compare BPF binaries
-	ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired, err := checkAndUpdateBPFBinaries(ebpfClient.bpfTCClient,
-		bpfBinaries, hostBinaryPath)
-	if err != nil {
-		//Log the error and move on
-		ebpfClient.logger.Error(err, "Probe validation/update failed but will continue to load")
-	}
-	ebpfClient.logger.Info("Probe validation Done")
+	if !runAsSystemProcess {
 
-	//Copy the latest binaries to /opt/cni/bin
-	err = cp.InstallBPFBinaries(bpfBinaries, hostBinaryPath)
-	if err != nil {
-		//Log the error and move on
-		ebpfClient.logger.Info("Failed to copy the eBPF binaries to host path....", "error", err)
+		//Set the hostBinaryPath when running as a container
+		hostBinaryPath = path.Join("/host", hostBinaryPath)
+
+		ingressUpdateRequired, egressUpdateRequired, eventsUpdateRequired, err = checkAndUpdateBPFBinaries(ebpfClient.bpfTCClient,
+			bpfBinaries, hostBinaryPath)
+		if err != nil {
+			//Log the error and move on
+			ebpfClient.logger.Error(err, "Probe validation/update failed but will continue to load")
+		}
+		ebpfClient.logger.Info("Probe validation Done")
+
+		//Copy the latest binaries to /opt/cni/bin
+		err = cp.InstallBPFBinaries(bpfBinaries, hostBinaryPath)
+		if err != nil {
+			//Log the error and move on
+			ebpfClient.logger.Info("Failed to copy the eBPF binaries to host path....", "error", err)
+		}
+		ebpfClient.logger.Info("Copied eBPF binaries to the host directory")
 	}
-	ebpfClient.logger.Info("Copied eBPF binaries to the host directory")
 
 	eventBufferFD := 0
 	isConntrackMapPresent, isPolicyEventsMapPresent, eventBufferFD, err = recoverBPFState(ebpfClient.bpfSDKClient, policyEndpointeBPFContext,
@@ -181,10 +189,19 @@ func NewBpfClient(policyEndpointeBPFContext *sync.Map, nodeIP string, enablePoli
 		if enableIPv6 {
 			eventsProbe = EVENTS_V6_BINARY
 		}
-		_, globalMapInfo, err := ebpfClient.bpfSDKClient.LoadBpfFile(eventsProbe, "global")
+		var bpfSdkInputData goelf.BpfCustomData
+		bpfSdkInputData.FilePath = eventsProbe
+		bpfSdkInputData.CustomPinPath = "global"
+		bpfSdkInputData.CustomMapSize = make(map[string]int)
+
+		bpfSdkInputData.CustomMapSize[AWS_CONNTRACK_MAP] = conntrackTableSize
+
+		ebpfClient.logger.Info("Setting conntrack cache map size: ", "max entries", conntrackTableSize)
+
+		_, globalMapInfo, err := ebpfClient.bpfSDKClient.LoadBpfFileWithCustomData(bpfSdkInputData)
 		if err != nil {
 			ebpfClient.logger.Error(err, "Unable to load events binary. Required for policy enforcement, exiting..")
-			sdkAPIErr.WithLabelValues("LoadBpfFile").Inc()
+			sdkAPIErr.WithLabelValues("LoadBpfFileWithCustomData").Inc()
 			return nil, err
 		}
 		ebpfClient.logger.Info("Successfully loaded events probe")
