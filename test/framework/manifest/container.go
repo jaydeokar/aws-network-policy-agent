@@ -21,7 +21,7 @@ type Container struct {
 func NewBusyBoxContainerBuilder() *Container {
 	return &Container{
 		name:            "busybox",
-		image:           "e2e-test-images/busybox:1.29-4",
+		image:           "busybox",
 		imagePullPolicy: v1.PullIfNotPresent,
 		command:         []string{"sleep", "3600"},
 		args:            []string{},
@@ -32,7 +32,7 @@ func NewBusyBoxContainerBuilder() *Container {
 func NewAgnHostContainerBuilder() *Container {
 	return &Container{
 		name:            "agnhost",
-		image:           "e2e-test-images/agnhost:2.45",
+		image:           "registry.k8s.io/e2e-test-images/agnhost:2.45",
 		command:         []string{"/bin/sh", "-c"},
 		imagePullPolicy: v1.PullIfNotPresent,
 	}
@@ -86,7 +86,7 @@ func (c *Container) AddVolumeMount(volumeMount v1.VolumeMount) *Container {
 func (w *Container) Build() v1.Container {
 	return v1.Container{
 		Name:            w.name,
-		Image:           fmt.Sprintf("%s%s", w.imageRepository, w.image),
+		Image:           w.image,
 		Command:         w.command,
 		Args:            w.args,
 		ImagePullPolicy: w.imagePullPolicy,
