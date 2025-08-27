@@ -44,6 +44,7 @@ struct lpm_trie_val {
 	__u32 protocol;
 	__u32 start_port;
 	__u32 end_port;
+	__u32 allow_or_deny;
 };
 
 struct conntrack_key {
@@ -68,6 +69,15 @@ struct data_t {
 	__u32  verdict;
 	__u32 packet_sz;
 	__u8 is_egress;
+};
+
+struct bpf_map_def_pvt SEC("maps") admin_ingress_map = {
+	.type = BPF_MAP_TYPE_LPM_TRIE,
+	.key_size =sizeof(struct lpm_trie_key),
+	.value_size = sizeof(struct lpm_trie_val[MAX_PORT_PROTOCOL]),
+	.max_entries = 65536,
+	.map_flags = BPF_F_NO_PREALLOC,
+	.pinning = PIN_GLOBAL_NS,
 };
 
 struct bpf_map_def_pvt SEC("maps") ingress_map = {

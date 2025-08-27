@@ -259,6 +259,7 @@ func (r *PolicyEndpointsReconciler) reconcilePolicyEndpoint(ctx context.Context,
 	parentNP := policyEndpoint.Spec.PolicyRef.Name
 	resourceNamespace := policyEndpoint.Namespace
 	resourceName := policyEndpoint.Name
+
 	targetPods, podIdentifiers, podsToBeCleanedUp := r.deriveTargetPodsForParentNP(ctx, parentNP, resourceNamespace, resourceName)
 
 	// Check if we need to remove this policy against any existing pods against which this policy
@@ -487,13 +488,12 @@ func (r *PolicyEndpointsReconciler) updateeBPFMaps(ctx context.Context, podIdent
 	return nil
 }
 
-func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Context,
-	parentNP, resourceNamespace, resourceName string) ([]types.NamespacedName, map[string]bool, []types.NamespacedName) {
+func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Context, parentNP, resourceNamespace, resourceName string) ([]types.NamespacedName, map[string]bool, []types.NamespacedName) {
 	var targetPods, podsToBeCleanedUp, currentPods []types.NamespacedName
 	var targetPodIdentifiers []string
 	podIdentifiers := make(map[string]bool)
-	currentPE := &policyk8sawsv1.PolicyEndpoint{}
 
+	// JD: This gets all the PEs belonging to the Network Policy
 	parentPEList := r.derivePolicyEndpointsOfParentNP(ctx, parentNP, resourceNamespace)
 	log().Infof("Parent NP resource: Name: %s Total PEs for Parent NP: Count: %d", parentNP, len(parentPEList))
 
@@ -509,15 +509,17 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 		}
 	}
 
+	// JD: Does this come when the PE or NP is deleted and we get reconcile request about deleted PE?
 	if len(parentPEList) == 0 {
 		podsToBeCleanedUp = append(podsToBeCleanedUp, currentPods...)
 		r.policyEndpointSelectorMap.Delete(policyEndpointIdentifier)
 		log().Infof("No PEs left: number of pods to cleanup - %d", len(podsToBeCleanedUp))
 	}
 
-	for _, policyEndpointResource := range parentPEList {
+	for _, policyEndpointResourceName := range parentPEList {
+		currentPE := &policyk8sawsv1.PolicyEndpoint{}
 		peNamespacedName := types.NamespacedName{
-			Name:      policyEndpointResource,
+			Name:      policyEndpointResourceName,
 			Namespace: resourceNamespace,
 		}
 		if err := r.k8sClient.Get(ctx, peNamespacedName, currentPE); err != nil {
@@ -525,7 +527,9 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 				continue
 			}
 		}
-		log().Infof("Processing PE Name %s", policyEndpointResource)
+		log().Infof("Processing PE Name %s", policyEndpointResourceName)
+		// This is Pod Identifier + target pod which is namespaced name belongs to the current node.
+		// It is giving all the pods that are targetted by the current PolicyEndpoint resource
 		currentTargetPods, currentPodIdentifiers := r.deriveTargetPods(ctx, currentPE, parentPEList)
 		log().Infof("Adding to current targetPods Total pods: %d", len(currentTargetPods))
 		targetPods = append(targetPods, currentTargetPods...)
@@ -548,6 +552,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 			log().Infof("No more target pods so deleting the entry in PE selector map for Name %s", policyEndpointResource)
 			r.policyEndpointSelectorMap.Delete(policyEndpointIdentifier)
 		}
+		// JD: This is to delete the PodIdentifier from the map if the PodIdentifier is not targetted by this current network policy
 		for _, podIdentifier := range stalePodIdentifiers {
 			r.deletePolicyEndpointFromPodIdentifierMap(ctx, podIdentifier, policyEndpointResource)
 		}
@@ -559,7 +564,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 	} else {
 		r.networkPolicyToPodIdentifierMap.Store(utils.GetParentNPNameFromPEName(resourceName), targetPodIdentifiers)
 	}
-
+	// JD: Go through this later
 	if len(currentPods) > 0 {
 		podsToBeCleanedUp = r.getPodListToBeCleanedUp(currentPods, targetPods, podIdentifiers)
 	}
@@ -569,8 +574,7 @@ func (r *PolicyEndpointsReconciler) deriveTargetPodsForParentNP(ctx context.Cont
 // Derives list of local pods the policy endpoint resource selects.
 // Function returns list of target pods along with their unique identifiers. It also
 // captures list of (any) existing pods against which this policy is no longer active.
-func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context,
-	policyEndpoint *policyk8sawsv1.PolicyEndpoint, parentPEList []string) ([]types.NamespacedName, map[string]bool) {
+func (r *PolicyEndpointsReconciler) deriveTargetPods(ctx context.Context, policyEndpoint *policyk8sawsv1.PolicyEndpoint, parentPEList []string) ([]types.NamespacedName, map[string]bool) {
 	var targetPods []types.NamespacedName
 	podIdentifiers := make(map[string]bool)
 

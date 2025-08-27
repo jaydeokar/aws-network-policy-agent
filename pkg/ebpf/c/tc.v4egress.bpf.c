@@ -44,6 +44,7 @@ struct lpm_trie_val {
     __u32 protocol;
     __u32 start_port;
     __u32 end_port;
+	__u32 allow_or_deny;
 };
 
 struct conntrack_key {
@@ -68,6 +69,15 @@ struct data_t {
 	__u32  verdict;
 	__u32 packet_sz;
 	__u8 is_egress;
+};
+
+struct bpf_map_def_pvt SEC("maps") admin_egress_map = {
+	.type = BPF_MAP_TYPE_LPM_TRIE,
+	.key_size = sizeof(struct lpm_trie_key),
+	.value_size = sizeof(struct lpm_trie_val[MAX_PORT_PROTOCOL]),
+	.max_entries = 65536,
+	.map_flags = BPF_F_NO_PREALLOC,
+	.pinning = PIN_GLOBAL_NS,
 };
 
 struct bpf_map_def_pvt SEC("maps") egress_map = {
@@ -157,7 +167,7 @@ int handle_egress(struct __sk_buff *skb)
 		return BPF_OK;
 	}
 
-	if (ether->h_proto == 0x08U) {  // htons(ETH_P_IP) -> 0x08U
+	if (ether->h_proto == 0x08U) {  // htons(ETH_P_IP) -> 0x08U // IPv4 packets
 		data += sizeof(*ether);
 		struct iphdr *ip = data;
 		struct tcphdr *l4_tcp_hdr = data + sizeof(struct iphdr);
