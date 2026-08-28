@@ -39,8 +39,7 @@ struct conntrack_key {
 };
 
 struct conntrack_value {
-   __u64 val;
-   __u64 last_seen;
+   __u8 val;
 };
 
 struct bpf_map_def_pvt SEC("maps") aws_conntrack_map = {

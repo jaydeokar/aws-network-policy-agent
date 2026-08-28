@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -19,20 +18,6 @@ import (
 
 type PodState struct {
 	State uint8
-}
-
-// formatLastSeen renders last_seen as an age. now must be a CLOCK_MONOTONIC
-// reading, to match the clock the datapath stamps with.
-func formatLastSeen(lastSeen, now uint64) string {
-	if lastSeen == 0 {
-		return "never"
-	}
-	if now == 0 || lastSeen > now {
-		// Either the clock read failed, or the datapath stamped the entry after
-		// we read the clock. Neither is an error, so avoid a negative age.
-		return "0s ago"
-	}
-	return time.Duration(now-lastSeen).Round(time.Millisecond).String() + " ago"
 }
 
 // Show - Displays all loaded AWS BPF Programs and their associated maps
@@ -223,12 +208,6 @@ func MapWalk(mapID int, mapNamePrefix string) error {
 	if mapInfo.Type == constdef.BPF_MAP_TYPE_LRU_HASH.Index() {
 		iterKey := utils.ConntrackKey{}
 		iterNextKey := utils.ConntrackKey{}
-		// Read once so every entry in this dump is aged against the same instant.
-		// A failure here only costs the age column, so carry on with the dump.
-		dumpNow, clockErr := utils.KtimeGetNs()
-		if clockErr != nil {
-			fmt.Printf("unable to read monotonic clock, ages will show as 0s: %v\n", clockErr)
-		}
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&iterKey)), mapID)
 		if err != nil {
 			if errors.Is(err, unix.ENOENT) {
@@ -247,7 +226,6 @@ func MapWalk(mapID int, mapNamePrefix string) error {
 					fmt.Println(retrievedKey)
 					fmt.Println("Value : ")
 					fmt.Println("Conntrack Val - ", iterValue.Value)
-					fmt.Printf("Last Seen (ns) -  %d  (%s)\n", iterValue.LastSeen, formatLastSeen(iterValue.LastSeen, dumpNow))
 					fmt.Println("*******************************")
 				}
 
@@ -399,12 +377,6 @@ func MapWalkv6(mapID int) error {
 		byteSlice := utils.ConvConntrackV6ToByte(iterKey)
 		nextbyteSlice := utils.ConvConntrackV6ToByte(iterNextKey)
 
-		// Read once so every entry in this dump is aged against the same instant.
-		// A failure here only costs the age column, so carry on with the dump.
-		dumpNow, clockErr := utils.KtimeGetNs()
-		if clockErr != nil {
-			fmt.Printf("unable to read monotonic clock, ages will show as 0s: %v\n", clockErr)
-		}
 		err = goebpfmaps.GetFirstMapEntryByID(uintptr(unsafe.Pointer(&byteSlice[0])), mapID)
 		if err != nil {
 			return fmt.Errorf("Unable to get First key: %v", err)
@@ -420,7 +392,6 @@ func MapWalkv6(mapID int) error {
 					fmt.Println(retrievedKey)
 					fmt.Println("Value : ")
 					fmt.Println("Conntrack Val - ", iterValue.Value)
-					fmt.Printf("Last Seen (ns) -  %d  (%s)\n", iterValue.LastSeen, formatLastSeen(iterValue.LastSeen, dumpNow))
 					fmt.Println("*******************************")
 				}
 
