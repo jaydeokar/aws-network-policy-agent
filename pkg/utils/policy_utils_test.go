@@ -79,33 +79,65 @@ func TestUpdatePodIdentifierToPolicyEndpointMap(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		tracked  []string
+		tracked  []TrackedPolicyEndpoint
+		parentNP string
 		incoming []string
-		want     []string
+		want     []TrackedPolicyEndpoint
 	}{
 		{
 			name:     "first insert for a new identifier",
 			tracked:  nil,
+			parentNP: "np",
 			incoming: []string{"np-abcd"},
-			want:     []string{"np-abcd"},
+			want:     []TrackedPolicyEndpoint{{ParentNP: "np", Name: "np-abcd"}},
 		},
 		{
-			name:     "already-tracked slice is not duplicated",
-			tracked:  []string{"np-abcd"},
+			name:     "re-inserting the same slice does not duplicate it",
+			tracked:  []TrackedPolicyEndpoint{{ParentNP: "np", Name: "np-abcd"}},
+			parentNP: "np",
 			incoming: []string{"np-abcd"},
-			want:     []string{"np-abcd"},
+			want:     []TrackedPolicyEndpoint{{ParentNP: "np", Name: "np-abcd"}},
 		},
 		{
-			name:     "new sibling slice is appended alongside the existing one",
-			tracked:  []string{"np-abcd"},
+			name:     "a new sibling slice is tracked alongside the existing one",
+			tracked:  []TrackedPolicyEndpoint{{ParentNP: "np", Name: "np-abcd"}},
+			parentNP: "np",
 			incoming: []string{"np-abcd", "np-efgh"},
-			want:     []string{"np-abcd", "np-efgh"},
+			want: []TrackedPolicyEndpoint{
+				{ParentNP: "np", Name: "np-abcd"}, {ParentNP: "np", Name: "np-efgh"},
+			},
 		},
 		{
-			name:     "another NP's slice is preserved",
-			tracked:  []string{"other-np-xyz"},
+			name:     "another policy's slices are preserved",
+			tracked:  []TrackedPolicyEndpoint{{ParentNP: "other-np", Name: "other-np-xyz"}},
+			parentNP: "np",
 			incoming: []string{"np-abcd"},
-			want:     []string{"other-np-xyz", "np-abcd"},
+			want: []TrackedPolicyEndpoint{
+				{ParentNP: "other-np", Name: "other-np-xyz"}, {ParentNP: "np", Name: "np-abcd"},
+			},
+		},
+		{
+			// The supplied list is authoritative for its parent, so a re-slice drops the
+			// obsolete name instead of accumulating it.
+			name:     "a re-sliced policy's obsolete name is replaced",
+			tracked:  []TrackedPolicyEndpoint{{ParentNP: "np", Name: "np-abcd"}},
+			parentNP: "np",
+			incoming: []string{"np-wxyz"},
+			want:     []TrackedPolicyEndpoint{{ParentNP: "np", Name: "np-wxyz"}},
+		},
+		{
+			// Two policies sharing a truncated name prefix derive the same parent, which is
+			// why the parent is recorded rather than derived: neither may evict the other.
+			name: "policies sharing a derived prefix do not evict each other",
+			tracked: []TrackedPolicyEndpoint{
+				{ParentNP: "a-very-long-policy-name-alpha", Name: "a-very-long-policy-name-aaaaa"},
+			},
+			parentNP: "a-very-long-policy-name-beta",
+			incoming: []string{"a-very-long-policy-name-bbbbb"},
+			want: []TrackedPolicyEndpoint{
+				{ParentNP: "a-very-long-policy-name-alpha", Name: "a-very-long-policy-name-aaaaa"},
+				{ParentNP: "a-very-long-policy-name-beta", Name: "a-very-long-policy-name-bbbbb"},
+			},
 		},
 	}
 
@@ -117,11 +149,9 @@ func TestUpdatePodIdentifierToPolicyEndpointMap(t *testing.T) {
 				m.Store(podIdentifier, tt.tracked)
 			}
 
-			UpdatePodIdentifierToPolicyEndpointMap(&m, &mu, podIdentifier, tt.incoming)
+			UpdatePodIdentifierToPolicyEndpointMap(&m, &mu, podIdentifier, tt.parentNP, tt.incoming)
 
-			got, ok := m.Load(podIdentifier)
-			assert.True(t, ok)
-			assert.ElementsMatch(t, tt.want, got.([]string))
+			assert.ElementsMatch(t, tt.want, TrackedPolicyEndpointsFor(&m, podIdentifier))
 		})
 	}
 }

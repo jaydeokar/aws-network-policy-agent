@@ -1469,7 +1469,6 @@ func TestClusterPolicySlices_MapReclamation(t *testing.T) {
 	nginx := identifierOf("nginx-aaa")
 
 	t.Run("a policy re-sliced under new names retains only its current slices", func(t *testing.T) {
-		t.Skip("Map1 insert is append-only; see UpdatePodIdentifierToPolicyEndpointMap")
 		fx := newCPEFixture(t)
 		pods := []podRef{localPod("nginx-aaa", "10.1.1.1")}
 		rules := []ruleRef{deny("192.168.90.1/32")}
@@ -1493,7 +1492,6 @@ func TestClusterPolicySlices_MapReclamation(t *testing.T) {
 	})
 
 	t.Run("the delete event for an already-replaced slice changes nothing", func(t *testing.T) {
-		t.Skip("Map1 insert is append-only; see UpdatePodIdentifierToPolicyEndpointMap")
 		fx := newCPEFixture(t)
 		pods := []podRef{localPod("nginx-aaa", "10.1.1.1")}
 		rules := []ruleRef{deny("192.168.90.1/32")}
@@ -1523,7 +1521,6 @@ func TestClusterPolicySlices_MapReclamation(t *testing.T) {
 	// per tracked name and skips NotFound, so a name whose object is gone contributes no
 	// rules. Pinned here so the trade-off stays visible.
 	t.Run("a re-slice that also deselects an identifier retains the departed slice name", func(t *testing.T) {
-		t.Skip("Map1 insert is append-only; see UpdatePodIdentifierToPolicyEndpointMap")
 		fx := newCPEFixture(t)
 		gone, kept := identifierOf("gone-aaa"), identifierOf("kept-aaa")
 		rules := []ruleRef{deny("192.168.90.1/32")}

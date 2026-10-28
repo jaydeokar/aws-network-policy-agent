@@ -42,57 +42,96 @@ func DeriveStalePodIdentifiers(networkPolicyToPodIdentifierMap *sync.Map, networ
 	return stalePodIdentifiers
 }
 
-// DeletePolicyEndpointFromPodIdentifierMap removes a policy endpoint from a pod's identifier map
+// TrackedPolicyEndpoint is one entry of podIdentifierToPolicyEndpointMap: a PolicyEndpoint
+// name together with the parent policy it belongs to.
+//
+// ParentNP is recorded rather than derived. A bare PolicyEndpoint name cannot be mapped back
+// to its parent reliably -- GetParentNPNameFromPEName strips after the last hyphen, and the
+// apiserver truncates a GenerateName base at 58 chars, so two policies agreeing up to the
+// last hyphen inside that prefix derive the same string. Writers always hold the live object,
+// so they can record the authoritative Spec.PolicyRef.Name instead.
+type TrackedPolicyEndpoint struct {
+	ParentNP string
+	Name     string
+}
+
+// TrackedPolicyEndpointsFor returns the entries recorded for a pod identifier, or nil.
+func TrackedPolicyEndpointsFor(podIdentifierToPolicyEndpointMap *sync.Map, podIdentifier string) []TrackedPolicyEndpoint {
+	if tracked, ok := podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
+		return tracked.([]TrackedPolicyEndpoint)
+	}
+	return nil
+}
+
+// DeletePolicyEndpointFromPodIdentifierMap removes one PolicyEndpoint, by exact name, from a
+// pod identifier's entries. Used by the delete-event scrub, which knows the departing name
+// from the request and must remove it whether or not the identifier went stale.
 func DeletePolicyEndpointFromPodIdentifierMap(podIdentifierToPolicyEndpointMap *sync.Map, mutex *sync.Mutex, podIdentifier string, policyEndpoint string) {
+	deleteMatching(podIdentifierToPolicyEndpointMap, mutex, podIdentifier,
+		func(e TrackedPolicyEndpoint) bool { return e.Name == policyEndpoint })
+}
+
+// DeleteParentNPFromPodIdentifierMap removes every entry a parent policy recorded for a pod
+// identifier, leaving other parents' entries in place. Safe to match on ParentNP because it
+// is the recorded Spec.PolicyRef.Name, not a derived prefix.
+func DeleteParentNPFromPodIdentifierMap(podIdentifierToPolicyEndpointMap *sync.Map, mutex *sync.Mutex, podIdentifier string, parentNP string) {
+	deleteMatching(podIdentifierToPolicyEndpointMap, mutex, podIdentifier,
+		func(e TrackedPolicyEndpoint) bool { return e.ParentNP == parentNP })
+}
+
+// deleteMatching drops entries satisfying match, deleting the key when nothing remains.
+func deleteMatching(podIdentifierToPolicyEndpointMap *sync.Map, mutex *sync.Mutex, podIdentifier string, match func(TrackedPolicyEndpoint) bool) {
 	mutex.Lock()
 	defer mutex.Unlock()
 
-	var currentList []string
-	if policyEndpointList, ok := podIdentifierToPolicyEndpointMap.Load(podIdentifier); ok {
-		for _, policyEndpointName := range policyEndpointList.([]string) {
-			if policyEndpointName == policyEndpoint {
-				continue
-			}
-			currentList = append(currentList, policyEndpointName)
+	tracked, ok := podIdentifierToPolicyEndpointMap.Load(podIdentifier)
+	if !ok {
+		return
+	}
+
+	var kept []TrackedPolicyEndpoint
+	for _, entry := range tracked.([]TrackedPolicyEndpoint) {
+		if match(entry) {
+			continue
 		}
-		if len(currentList) == 0 {
-			podIdentifierToPolicyEndpointMap.Delete(podIdentifier)
-		} else {
-			podIdentifierToPolicyEndpointMap.Store(podIdentifier, currentList)
-		}
+		kept = append(kept, entry)
+	}
+	if len(kept) == 0 {
+		podIdentifierToPolicyEndpointMap.Delete(podIdentifier)
+	} else {
+		podIdentifierToPolicyEndpointMap.Store(podIdentifier, kept)
 	}
 }
 
-// UpdatePodIdentifierToPolicyEndpointMap adds the supplied policy endpoints to the ones
-// already tracked for this pod identifier, skipping duplicates. It never removes a name.
+// UpdatePodIdentifierToPolicyEndpointMap makes policyEndpointList authoritative for parentNP:
+// every entry previously recorded under that parent is replaced, and entries belonging to
+// other parents are preserved untouched.
 //
-// Append-only is deliberate. Replacing a parent's names would reclaim the names of
-// re-sliced PolicyEndpoints, but deciding which stored names belong to this parent means
-// deriving it with GetParentNPNameFromPEName, which is lossy above 58 chars -- so it can
-// evict another policy's names and stop its rules being assembled, dropping a Deny on the
-// cluster path. Mis-tracking costs enforcement; under-tracking costs memory.
-//
-// The cost: a name that leaves the live slice set while the identifier is still selected is
-// never pruned, so the key survives. Bounded by resharding, not pod churn. See the skipped
-// subtests in controllers/{cluster,}policyendpoints_slice_test.go.
-//
-// Fix: store the parent per entry (podIdentifier -> []struct{ParentNP, Name string}) so both
-// eviction and pruning compare a recorded Spec.PolicyRef.Name. Needs the parent on the
-// delete path too, where the object is gone.
-func UpdatePodIdentifierToPolicyEndpointMap(podIdentifierMap *sync.Map, mutex *sync.Mutex, podIdentifier string, policyEndpointList []string) {
+// Replacing is what reclaims the names of re-sliced PolicyEndpoints. An identifier a sibling
+// slice still selects never becomes stale, so the purge never visits it and the obsolete name
+// would otherwise stay forever. Matching on the recorded ParentNP makes that safe -- an
+// earlier revision derived the parent from each stored name, which is lossy above 58 chars
+// and could evict a *different* policy's names, silently dropping its rules.
+func UpdatePodIdentifierToPolicyEndpointMap(podIdentifierMap *sync.Map, mutex *sync.Mutex, podIdentifier string, parentNP string, policyEndpointList []string) {
 	mutex.Lock()
 	defer mutex.Unlock()
 
-	var policyEndpoints []string
-	if currentSet, ok := podIdentifierMap.Load(podIdentifier); ok {
-		policyEndpoints = currentSet.([]string)
-		for _, policyEndpointResourceName := range policyEndpointList {
-			if !slices.Contains(policyEndpoints, policyEndpointResourceName) {
-				policyEndpoints = append(policyEndpoints, policyEndpointResourceName)
-			}
-		}
-	} else {
-		policyEndpoints = append(policyEndpoints, policyEndpointList...)
+	if len(policyEndpointList) == 0 {
+		return
 	}
-	podIdentifierMap.Store(podIdentifier, policyEndpoints)
+
+	// Other parents' entries survive; this parent's are rebuilt from policyEndpointList.
+	existing, _ := podIdentifierMap.Load(podIdentifier)
+	entries, _ := existing.([]TrackedPolicyEndpoint)
+	kept := make([]TrackedPolicyEndpoint, 0, len(entries)+len(policyEndpointList))
+	for _, entry := range entries {
+		if entry.ParentNP != parentNP {
+			kept = append(kept, entry)
+		}
+	}
+
+	for _, policyEndpointName := range policyEndpointList {
+		kept = append(kept, TrackedPolicyEndpoint{ParentNP: parentNP, Name: policyEndpointName})
+	}
+	podIdentifierMap.Store(podIdentifier, kept)
 }

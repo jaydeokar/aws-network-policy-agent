@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -36,7 +35,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		parentCNP := "isolate-dark-corner"
 
 		// Simulate prior state: pod was previously targeted by this CPE
-		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, []string{cpeName})
+		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, trackedPEs(cpeName))
 		reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
 		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeName, []npatypes.Pod{
 			{NamespacedName: types.NamespacedName{Name: podName, Namespace: podNamespace}, PodIP: "192.168.95.108"},
@@ -121,7 +120,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		cpeName := "isolate-dark-corner-t7p5w"
 		parentCNP := "isolate-dark-corner"
 
-		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, []string{cpeName})
+		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, trackedPEs(cpeName))
 		reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
 		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeName, []npatypes.Pod{
 			{NamespacedName: types.NamespacedName{Name: "nginx-abc123", Namespace: "np-target"}, PodIP: "192.168.95.108"},
@@ -171,7 +170,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		parentCNP := "isolate-dark-corner"
 
 		// Prior state: identifier holds BOTH CPEs of the same parent CNP.
-		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, []string{cpeA, cpeB})
+		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, trackedPEs(cpeA, cpeB))
 		reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
 		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeA, []npatypes.Pod{
 			{NamespacedName: types.NamespacedName{Name: "nginx-abc123", Namespace: "np-target"}, PodIP: "192.168.95.108"},
@@ -337,7 +336,7 @@ func TestReconcileClusterPolicyEndpoint_StalePodIdentifiersClearedFromEbpf(t *te
 		}
 
 		// Pre-populate: pod was already a target in prior reconcile
-		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, []string{cpeName})
+		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, trackedPEs(cpeName))
 		reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
 		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeName, []npatypes.Pod{
 			{NamespacedName: types.NamespacedName{Name: podName, Namespace: podNamespace}, PodIP: "192.168.95.108"},
@@ -390,7 +389,7 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 		parentCNP := "isolate-dark-corner"
 
 		// Simulate prior state
-		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, []string{cpeName})
+		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, trackedPEs(cpeName))
 		reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
 		reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeName, []npatypes.Pod{
 			{NamespacedName: types.NamespacedName{Name: "nginx-abc123", Namespace: "np-target"}, PodIP: "192.168.95.108"},
@@ -404,7 +403,7 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 			},
 		).AnyTimes()
 
-		err := reconciler.cleanUpClusterPolicyEndpoint(context.TODO(), controllerruntime.Request{
+		err := reconciler.cleanUpClusterPolicyEndpoint(context.TODO(), ClusterPolicyEndpointRequest{
 			NamespacedName: types.NamespacedName{Name: cpeName},
 		})
 		assert.Nil(t, err)
@@ -439,7 +438,7 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 		siblingCPE := "isolate-dark-corner-x9k4m"
 		parentCNP := "isolate-dark-corner"
 
-		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, []string{deletedCPE, siblingCPE})
+		reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, trackedPEs(deletedCPE, siblingCPE))
 		reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
 		reconciler.ClusterPolicyEndpointSelectorMap.Store(deletedCPE, []npatypes.Pod{
 			{NamespacedName: types.NamespacedName{Name: "nginx-abc123", Namespace: "np-target"}, PodIP: "192.168.95.108"},
@@ -462,7 +461,7 @@ func TestCleanUpClusterPolicyEndpoint_StalePodIdentifiersCleanedUp(t *testing.T)
 			},
 		).AnyTimes()
 
-		err := reconciler.cleanUpClusterPolicyEndpoint(context.TODO(), controllerruntime.Request{
+		err := reconciler.cleanUpClusterPolicyEndpoint(context.TODO(), ClusterPolicyEndpointRequest{
 			NamespacedName: types.NamespacedName{Name: deletedCPE},
 		})
 		assert.Nil(t, err)
@@ -493,7 +492,7 @@ func TestReconcileClusterPolicyEndpoint_TransientListErrorDoesNotClearEbpf(t *te
 	cpeName := "isolate-dark-corner-t7p5w"
 	parentCNP := "isolate-dark-corner"
 
-	reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, []string{cpeName})
+	reconciler.podIdentifierToClusterPolicyEndpointMap.Store(podIdentifier, trackedPEs(cpeName))
 	reconciler.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNP, []string{podIdentifier})
 	reconciler.ClusterPolicyEndpointSelectorMap.Store(cpeName, []npatypes.Pod{
 		{NamespacedName: types.NamespacedName{Name: "nginx-abc123", Namespace: "np-target"}, PodIP: "192.168.95.108"},

@@ -36,7 +36,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
@@ -100,10 +102,19 @@ type ClusterPolicyEndpointsReconciler struct {
 	ebpfClient ebpf.BpfClient
 }
 
+// ClusterPolicyEndpointRequest is this controller's workqueue item, the cluster-scoped mirror
+// of PolicyEndpointRequest. It carries the parent policy name because the delete path cannot
+// read Spec.PolicyRef.Name off the object, and over-deleting on the cluster path drops Deny
+// rules, i.e. opens traffic.
+type ClusterPolicyEndpointRequest struct {
+	types.NamespacedName
+	ParentCNP string
+}
+
 //+kubebuilder:rbac:groups=networking.k8s.aws,resources=clusterpolicyendpoints,verbs=get;list;watch
 //+kubebuilder:rbac:groups=networking.k8s.aws,resources=clusterpolicyendpoints/status,verbs=get
 
-func (r *ClusterPolicyEndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *ClusterPolicyEndpointsReconciler) Reconcile(ctx context.Context, req ClusterPolicyEndpointRequest) (ctrl.Result, error) {
 	log().Infof("Received a new reconcile request for ClusterPolicyEndpoint %v", req)
 	if err := r.reconcile(ctx, req); err != nil {
 		log().Errorf("ClusterPolicyEndpoint reconcile error: %v", err)
@@ -112,7 +123,7 @@ func (r *ClusterPolicyEndpointsReconciler) Reconcile(ctx context.Context, req ct
 	return ctrl.Result{}, nil
 }
 
-func (r *ClusterPolicyEndpointsReconciler) reconcile(ctx context.Context, req ctrl.Request) error {
+func (r *ClusterPolicyEndpointsReconciler) reconcile(ctx context.Context, req ClusterPolicyEndpointRequest) error {
 	ClusterPolicyEndpoint := &policyk8sawsv1.ClusterPolicyEndpoint{}
 	// Cluster-scoped: use only name, no namespace
 	if err := r.k8sClient.Get(ctx, types.NamespacedName{Name: req.Name}, ClusterPolicyEndpoint); err != nil {
@@ -128,12 +139,12 @@ func (r *ClusterPolicyEndpointsReconciler) reconcile(ctx context.Context, req ct
 	return r.reconcileClusterPolicyEndpoint(ctx, ClusterPolicyEndpoint)
 }
 
-func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx context.Context, req ctrl.Request) error {
+func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx context.Context, req ClusterPolicyEndpointRequest) error {
 	log().Infof("Clean Up ClusterPolicyEndpoint resources for name: %s", req.Name)
 
 	r.lastObservedTriggerTimes.Delete(req.Name)
 
-	parentCNPName := utils.GetParentNPNameFromPEName(req.Name)
+	parentCNPName := req.ParentCNP
 	resourceName := req.Name
 
 	targetPods, targetPodIdentifiers, podsToBeCleanedUp, parentCPEList, clusterWidePodIdentifiers, err :=
@@ -155,11 +166,11 @@ func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx cont
 
 	log().Infof("cleanUpClusterPolicyEndpoint: Pods to cleanup - %d and Pods to be updated - %d", len(podsToBeCleanedUp), len(targetPods))
 
-	_, updateErr := r.updateClusterPolicyEnforcementStatusForPods(ctx, req.Name, targetPods, targetPodIdentifiers, false)
+	_, updateErr := r.updateClusterPolicyEnforcementStatusForPods(ctx, req.Name, parentCNPName, targetPods, targetPodIdentifiers, false)
 	if updateErr != nil {
 		log().Errorf("failed to update cluster policy bpf probes for policy endpoint %s : %v", req.Name, updateErr)
 	}
-	failedCleanups, cleanupErr := r.updateClusterPolicyEnforcementStatusForPods(ctx, req.Name, podsToBeCleanedUp, targetPodIdentifiers, true)
+	failedCleanups, cleanupErr := r.updateClusterPolicyEnforcementStatusForPods(ctx, req.Name, parentCNPName, podsToBeCleanedUp, targetPodIdentifiers, true)
 	if cleanupErr != nil {
 		log().Errorf("failed to clean up cluster policy bpf probes for policy endpoint %s : %v", req.Name, cleanupErr)
 	}
@@ -170,7 +181,7 @@ func (r *ClusterPolicyEndpointsReconciler) cleanUpClusterPolicyEndpoint(ctx cont
 	for _, pod := range failedCleanups {
 		trackedPodIdentifiers[utils.GetPodIdentifier(pod.Name, pod.Namespace)] = true
 	}
-	r.commitClusterPolicyEndpointState(resourceName, trackedPods, trackedPodIdentifiers, parentCPEList)
+	r.commitClusterPolicyEndpointState(parentCNPName, trackedPods, trackedPodIdentifiers, parentCPEList)
 
 	// Until every cleanup succeeds, the deleted CPE's entry holds the ones that failed, so the
 	// retry repeats only those. If the CPE is in parentCPEList (its deletion is in progress,
@@ -200,7 +211,7 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 
 	// Programming runs whether or not cleanup succeeded, so a failing cleanup does not hold
 	// back the other pods this CPE selects.
-	failedCleanups, cleanupErr := r.updateClusterPolicyEnforcementStatusForPods(ctx, ClusterPolicyEndpoint.Name, podsToBeCleanedUp, targetPodIdentifiers, false)
+	failedCleanups, cleanupErr := r.updateClusterPolicyEnforcementStatusForPods(ctx, ClusterPolicyEndpoint.Name, parentCNPName, podsToBeCleanedUp, targetPodIdentifiers, false)
 	if cleanupErr != nil {
 		log().Errorf("failed to update cluster policy enforcement status for existing pods: %v", cleanupErr)
 	}
@@ -212,11 +223,11 @@ func (r *ClusterPolicyEndpointsReconciler) reconcileClusterPolicyEndpoint(ctx co
 	for _, pod := range failedCleanups {
 		trackedPodIdentifiers[utils.GetPodIdentifier(pod.Name, pod.Namespace)] = true
 	}
-	r.commitClusterPolicyEndpointState(resourceName, trackedPods, trackedPodIdentifiers, parentCPEList)
+	r.commitClusterPolicyEndpointState(parentCNPName, trackedPods, trackedPodIdentifiers, parentCPEList)
 
 	var programmingErr error
 	for podIdentifier := range targetPodIdentifiers {
-		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, ClusterPolicyEndpoint.Name, false)
+		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, ClusterPolicyEndpoint.Name, parentCNPName, false)
 		if err != nil {
 			log().Errorf("Error Parsing cluster policy Endpoint resource %s for podIdentifier %s: %v", ClusterPolicyEndpoint.Name, podIdentifier, err)
 			programmingErr = errors.Join(programmingErr, err)
@@ -345,24 +356,22 @@ func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyBPFMaps(podIdentif
 	return nil
 }
 
-func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFirewallRules(ctx context.Context, podIdentifier string, resourceName string, isDeleteFlow bool) ([]fwrp.EbpfFirewallRules, []fwrp.EbpfFirewallRules, error) {
+func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyIngressAndEgressFirewallRules(ctx context.Context, podIdentifier string, resourceName string, parentCNPName string, isDeleteFlow bool) ([]fwrp.EbpfFirewallRules, []fwrp.EbpfFirewallRules, error) {
 
 	var clusterPolicyIngressRules, clusterPolicyEgressRules []fwrp.EbpfFirewallRules
 	currentCPE := &policyk8sawsv1.ClusterPolicyEndpoint{}
 
-	if ClusterPolicyEndpointList, ok := r.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier); ok {
-		log().Infof("Total number of ClusterPolicyEndpoint resources for podIdentifier %s are %d", podIdentifier, len(ClusterPolicyEndpointList.([]string)))
-		for _, ClusterPolicyEndpointResource := range ClusterPolicyEndpointList.([]string) {
+	if tracked := utils.TrackedPolicyEndpointsFor(&r.podIdentifierToClusterPolicyEndpointMap, podIdentifier); len(tracked) > 0 {
+		log().Infof("Total number of ClusterPolicyEndpoint resources for podIdentifier %s are %d", podIdentifier, len(tracked))
+		for _, trackedCPE := range tracked {
+			ClusterPolicyEndpointResource := trackedCPE.Name
 			// Cluster-scoped: no namespace
 			cpeNamespacedName := types.NamespacedName{Name: ClusterPolicyEndpointResource}
 
-			if isDeleteFlow {
-				deletedCPEParentCNPName := utils.GetParentNPNameFromPEName(resourceName)
-				currentCPEParentCNPName := utils.GetParentNPNameFromPEName(ClusterPolicyEndpointResource)
-				if deletedCPEParentCNPName == currentCPEParentCNPName {
-					log().Debugf("CPE belongs to same CNP. Ignore and move on since it's a delete flow deletedCPE %s currentCPE %s", resourceName, ClusterPolicyEndpointResource)
-					continue
-				}
+			// Skip the policy being deleted by its recorded parent, not a derived prefix.
+			if isDeleteFlow && trackedCPE.ParentNP == parentCNPName {
+				log().Debugf("CPE belongs to same CNP. Ignore and move on since it's a delete flow deletedCPE %s currentCPE %s", resourceName, ClusterPolicyEndpointResource)
+				continue
 			}
 
 			if err := r.k8sClient.Get(ctx, cpeNamespacedName, currentCPE); err != nil {
@@ -442,7 +451,7 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 			return cpe.Name
 		})
 		for _, currentCPE := range parentCPEObjects {
-			currentTargetPods, currentPodIdentifiers, currentClusterwidePodIdentifiers := r.deriveClusterPolicyTargetPods(&currentCPE, parentCPEList)
+			currentTargetPods, currentPodIdentifiers, currentClusterwidePodIdentifiers := r.deriveClusterPolicyTargetPods(&currentCPE, parentCNPName, parentCPEList)
 			newTargetPods = append(newTargetPods, currentTargetPods...)
 			for pid := range currentPodIdentifiers {
 				podIdentifiers[pid] = true
@@ -453,8 +462,6 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 		}
 	}
 
-	// parentCNPName is derived from the resource name to maintain consistency with the read and write operations on Maps
-	parentCNPName = utils.GetParentNPNameFromPEName(resourceName)
 	stalePodIdentifiers = utils.DeriveStalePodIdentifiers(&r.clusterNetworkPolicyToPodIdentifierMap, parentCNPName, clusterWidePodIdentifiers)
 
 	// Commit records the parent's pods under every one of its CPEs, so a CPE reconciled before
@@ -466,24 +473,10 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 	}
 	currentPods = lo.Uniq(currentPods)
 
-	// Prune by exact ClusterPolicyEndpoint name rather than by derived parent CNP name.
-	// GetParentNPNameFromPEName is lossy under GenerateName truncation, so a parent-wide
-	// match can drop a different CNP's slices -- and for cluster policies those carry Deny
-	// rules. Exact names can only ever under-delete.
-	//
-	// The live list alone is not sufficient: a stale identifier still holds the slice names
-	// from the reconcile that last selected it, and the CPE being deleted is by definition no
-	// longer in the live list. Prune against the live slices PLUS resourceName, which on the
-	// delete path is the departing CPE's own name (and is already a member of parentCPEList
-	// on the reconcile path, making it a no-op).
-	pruneNames := parentCPEList
-	if !slices.Contains(pruneNames, resourceName) {
-		pruneNames = append(slices.Clone(parentCPEList), resourceName)
-	}
+	// Prune every name this parent recorded for a stale identifier, matching on the recorded
+	// ParentNP so it cannot reach another CNP's entries.
 	for _, podIdentifier := range stalePodIdentifiers {
-		for _, cpeName := range pruneNames {
-			utils.DeletePolicyEndpointFromPodIdentifierMap(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, cpeName)
-		}
+		utils.DeleteParentNPFromPodIdentifierMap(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, parentCNPName)
 	}
 
 	if len(currentPods) > 0 {
@@ -492,7 +485,7 @@ func (r *ClusterPolicyEndpointsReconciler) deriveTargetPodsForParentCNP(ctx cont
 	return newTargetPods, podIdentifiers, podsToBeCleanedUp, parentCPEList, clusterWidePodIdentifiers, nil
 }
 
-func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyTargetPods(ClusterPolicyEndpoint *policyk8sawsv1.ClusterPolicyEndpoint, parentCPEList []string) ([]npatypes.Pod, map[string]bool, map[string]bool) {
+func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyTargetPods(ClusterPolicyEndpoint *policyk8sawsv1.ClusterPolicyEndpoint, parentCNPName string, parentCPEList []string) ([]npatypes.Pod, map[string]bool, map[string]bool) {
 	var targetPods []npatypes.Pod
 	podIdentifiers := make(map[string]bool)
 	clusterwidePodIdentifiers := make(map[string]bool)
@@ -505,17 +498,17 @@ func (r *ClusterPolicyEndpointsReconciler) deriveClusterPolicyTargetPods(Cluster
 			targetPods = append(targetPods, npatypes.Pod{NamespacedName: types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, PodIP: pod.PodIP})
 			podIdentifiers[podIdentifier] = true
 		}
-		utils.UpdatePodIdentifierToPolicyEndpointMap(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, parentCPEList)
+		utils.UpdatePodIdentifierToPolicyEndpointMap(&r.podIdentifierToClusterPolicyEndpointMap, &r.podIdentifierToClusterPolicyEndpointMapMutex, podIdentifier, parentCNPName, parentCPEList)
 	}
 	return targetPods, podIdentifiers, clusterwidePodIdentifiers
 }
 
 // updateClusterPolicyEnforcementStatusForPods returns the pods whose cleanup failed.
-func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyEnforcementStatusForPods(ctx context.Context, ClusterPolicyEndpointName string, cleanupPods []npatypes.Pod, podIdentifiers map[string]bool, isDeleteFlow bool) ([]npatypes.Pod, error) {
+func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyEnforcementStatusForPods(ctx context.Context, ClusterPolicyEndpointName string, parentCNPName string, cleanupPods []npatypes.Pod, podIdentifiers map[string]bool, isDeleteFlow bool) ([]npatypes.Pod, error) {
 	var failed []npatypes.Pod
 	var err error
 	for _, cleanupPod := range cleanupPods {
-		if cleanupErr := r.cleanupClusterPolicyPod(ctx, cleanupPod, ClusterPolicyEndpointName, isDeleteFlow); cleanupErr != nil {
+		if cleanupErr := r.cleanupClusterPolicyPod(ctx, cleanupPod, ClusterPolicyEndpointName, parentCNPName, isDeleteFlow); cleanupErr != nil {
 			log().Errorf("Cluster Policy Cleanup/Update unsuccessful for Pod Name: %s Namespace: %s ", cleanupPod.Name, cleanupPod.Namespace)
 			failed = append(failed, cleanupPod)
 			err = errors.Join(err, cleanupErr)
@@ -524,7 +517,7 @@ func (r *ClusterPolicyEndpointsReconciler) updateClusterPolicyEnforcementStatusF
 	return failed, err
 }
 
-func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.Context, targetPod npatypes.Pod, clusterPolicyEndpoint string, isDeleteFlow bool) error {
+func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.Context, targetPod npatypes.Pod, clusterPolicyEndpoint string, parentCNPName string, isDeleteFlow bool) error {
 	podIdentifier := utils.GetPodIdentifier(targetPod.Name, targetPod.Namespace)
 
 	// The map consulted below is populated for pods on every node, so it cannot tell us
@@ -538,7 +531,7 @@ func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.C
 	if _, ok := r.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier); ok {
 		// A sibling CPE (from this or another parent CNP) still targets the identifier —
 		// recompute rules from what remains.
-		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, clusterPolicyEndpoint, isDeleteFlow)
+		ingressRules, egressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, clusterPolicyEndpoint, parentCNPName, isDeleteFlow)
 		if err != nil {
 			log().Errorf("Error Parsing cluster policy Endpoint resource %s: %v", clusterPolicyEndpoint, err)
 			return err
@@ -562,10 +555,10 @@ func (r *ClusterPolicyEndpointsReconciler) cleanupClusterPolicyPod(ctx context.C
 // commitClusterPolicyEndpointState updates the two maps derive left untouched. Runs after
 // cleanup. Callers also pass the pods whose cleanup failed, so the retry derives them as
 // stale again. Keys clusterNetworkPolicyToPodIdentifierMap by
-// GetParentNPNameFromPEName(resourceName) — the same derivation the reader uses, so writes
-// and reads agree when GenerateName truncates the CPE base (CNP names >= 58 chars).
+// the authoritative Spec.PolicyRef.Name the caller passes, so reads and writes agree without
+// going through the lossy name derivation.
 func (r *ClusterPolicyEndpointsReconciler) commitClusterPolicyEndpointState(
-	resourceName string,
+	parentCNPName string,
 	newTargetPods []npatypes.Pod,
 	clusterWidePodIdentifiers map[string]bool,
 	parentCPEList []string,
@@ -578,16 +571,15 @@ func (r *ClusterPolicyEndpointsReconciler) commitClusterPolicyEndpointState(
 		}
 	}
 
-	parentKey := utils.GetParentNPNameFromPEName(resourceName)
 	if len(clusterWidePodIdentifiers) == 0 {
-		r.clusterNetworkPolicyToPodIdentifierMap.Delete(parentKey)
+		r.clusterNetworkPolicyToPodIdentifierMap.Delete(parentCNPName)
 		return
 	}
 	clusterWidePodIdentifiersList := make([]string, 0, len(clusterWidePodIdentifiers))
 	for pid := range clusterWidePodIdentifiers {
 		clusterWidePodIdentifiersList = append(clusterWidePodIdentifiersList, pid)
 	}
-	r.clusterNetworkPolicyToPodIdentifierMap.Store(parentKey, clusterWidePodIdentifiersList)
+	r.clusterNetworkPolicyToPodIdentifierMap.Store(parentCNPName, clusterWidePodIdentifiersList)
 }
 
 // getClusterPolicyEndpointsOfParentCNP returns the CPEs whose PolicyRef.Name matches
@@ -614,7 +606,7 @@ func (r *ClusterPolicyEndpointsReconciler) getClusterPolicyEndpointsOfParentCNP(
 func (r *ClusterPolicyEndpointsReconciler) DeriveClusterPolicyFireWallRulesPerPodIdentifier(ctx context.Context, podIdentifier string) ([]fwrp.EbpfFirewallRules,
 	[]fwrp.EbpfFirewallRules, error) {
 
-	clusterPolicyIngressRules, clusterPolicyEgressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, "", false)
+	clusterPolicyIngressRules, clusterPolicyEgressRules, err := r.deriveClusterPolicyIngressAndEgressFirewallRules(ctx, podIdentifier, "", "", false)
 	if err != nil {
 		log().Errorf("Error deriving cluster firewall rules: %v", err)
 		return clusterPolicyIngressRules, clusterPolicyEgressRules, err
@@ -624,11 +616,9 @@ func (r *ClusterPolicyEndpointsReconciler) DeriveClusterPolicyFireWallRulesPerPo
 }
 
 func (r *ClusterPolicyEndpointsReconciler) ArePoliciesAvailableInLocalCache(podIdentifier string) bool {
-	if policyEndpointList, ok := r.podIdentifierToClusterPolicyEndpointMap.Load(podIdentifier); ok {
-		if len(policyEndpointList.([]string)) > 0 {
-			log().Infof("Active cluster policies available against podIdentifier %s", podIdentifier)
-			return true
-		}
+	if len(utils.TrackedPolicyEndpointsFor(&r.podIdentifierToClusterPolicyEndpointMap, podIdentifier)) > 0 {
+		log().Infof("Active cluster policies available against podIdentifier %s", podIdentifier)
+		return true
 	}
 	return false
 }
@@ -639,7 +629,21 @@ func (r *ClusterPolicyEndpointsReconciler) GeteBPFClient() ebpf.BpfClient {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ClusterPolicyEndpointsReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&policyk8sawsv1.ClusterPolicyEndpoint{}).
+	return builder.TypedControllerManagedBy[ClusterPolicyEndpointRequest](mgr).
+		Named("clusterpolicyendpoint").
+		Watches(&policyk8sawsv1.ClusterPolicyEndpoint{},
+			handler.TypedEnqueueRequestsFromMapFunc(
+				func(_ context.Context, obj client.Object) []ClusterPolicyEndpointRequest {
+					clusterPolicyEndpoint, ok := obj.(*policyk8sawsv1.ClusterPolicyEndpoint)
+					if !ok {
+						log().Errorf("Dropping event for unexpected object type %T", obj)
+						return nil
+					}
+					// Cluster-scoped: name only, no namespace.
+					return []ClusterPolicyEndpointRequest{{
+						NamespacedName: types.NamespacedName{Name: clusterPolicyEndpoint.Name},
+						ParentCNP:      clusterPolicyEndpoint.Spec.PolicyRef.Name,
+					}}
+				})).
 		Complete(r)
 }

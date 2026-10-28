@@ -212,5 +212,9 @@ func expectConn(proberPodName, ip, want, desc string) {
 		last = v
 		return v, nil
 	}, bpfSettleTimeout, bpfPollInterval).Should(Equal(want),
-		"%s: expected %s, last observed %s", desc, want, &last)
+		// Lazily evaluated by Gomega at failure time. A format string would be rendered
+		// before polling starts, when last is still empty.
+		func() string {
+			return fmt.Sprintf("%s: expected %s, last observed %s", desc, want, last)
+		})
 }

@@ -501,7 +501,6 @@ func TestPolicySlices_MapReclamation(t *testing.T) {
 	nginx := identifierOf("nginx-aaa")
 
 	t.Run("a policy re-sliced under new names retains only its current slices", func(t *testing.T) {
-		t.Skip("Map1 insert is append-only; see UpdatePodIdentifierToPolicyEndpointMap")
 		fx := newPEFixture(t)
 		pods := []podRef{localPod("nginx-aaa", "10.1.1.1")}
 		rules := []ruleRef{allow("192.168.90.1/32")}
@@ -529,7 +528,6 @@ func TestPolicySlices_MapReclamation(t *testing.T) {
 	})
 
 	t.Run("the delete event for an already-replaced slice changes nothing", func(t *testing.T) {
-		t.Skip("Map1 insert is append-only; see UpdatePodIdentifierToPolicyEndpointMap")
 		fx := newPEFixture(t)
 		pods := []podRef{localPod("nginx-aaa", "10.1.1.1")}
 		rules := []ruleRef{allow("192.168.90.1/32")}
@@ -581,7 +579,6 @@ func TestPolicySlices_MapReclamation(t *testing.T) {
 	//     at all (asserted below), so its eBPF maps keep whatever the previous reconcile
 	//     wrote. The sibling delete event is what closes the window.
 	t.Run("a re-slice that also deselects an identifier retains the departed slice name", func(t *testing.T) {
-		t.Skip("Map1 insert is append-only; see UpdatePodIdentifierToPolicyEndpointMap")
 		fx := newPEFixture(t)
 		gone, kept := identifierOf("gone-aaa"), identifierOf("kept-aaa")
 		rules := []ruleRef{allow("192.168.90.1/32")}
@@ -668,7 +665,6 @@ func TestPolicySlices_MapReclamation(t *testing.T) {
 	})
 
 	t.Run("deleting every slice of a policy leaves no entry behind", func(t *testing.T) {
-		t.Skip("Map1 insert is append-only; see UpdatePodIdentifierToPolicyEndpointMap")
 		fx := newPEFixture(t)
 		pods := []podRef{localPod("nginx-aaa", "10.1.1.1")}
 

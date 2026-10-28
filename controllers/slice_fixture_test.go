@@ -17,7 +17,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -147,10 +146,11 @@ func prioritiesOf(rules []fwrp.EbpfFirewallRules) []int {
 // ---------------------------------------------------------------------------
 
 type cpeFixture struct {
-	t     *testing.T
-	r     *ClusterPolicyEndpointsReconciler
-	bpf   *ebpf.MockBpfClient
-	store map[string]policyk8sawsv1.ClusterPolicyEndpoint
+	t            *testing.T
+	r            *ClusterPolicyEndpointsReconciler
+	bpf          *ebpf.MockBpfClient
+	store        map[string]policyk8sawsv1.ClusterPolicyEndpoint
+	sliceParents map[string]string
 	// getErr makes Get fail for the named CPEs, modelling an API error while deriving rules.
 	getErr map[string]error
 }
@@ -162,9 +162,10 @@ func newCPEFixture(t *testing.T) *cpeFixture {
 
 	mockClient := mock_client.NewMockClient(ctrl)
 	fx := &cpeFixture{
-		t:     t,
-		bpf:   &ebpf.MockBpfClient{},
-		store: map[string]policyk8sawsv1.ClusterPolicyEndpoint{},
+		t:            t,
+		bpf:          &ebpf.MockBpfClient{},
+		store:        map[string]policyk8sawsv1.ClusterPolicyEndpoint{},
+		sliceParents: map[string]string{},
 	}
 	fx.r = NewClusterPolicyEndpointsReconciler(mockClient, fixtureNodeIP, fx.bpf)
 
@@ -199,6 +200,7 @@ func newCPEFixture(t *testing.T) *cpeFixture {
 func (fx *cpeFixture) setSlices(specs ...sliceSpec) {
 	fx.store = map[string]policyk8sawsv1.ClusterPolicyEndpoint{}
 	for _, s := range specs {
+		fx.sliceParents[s.name] = s.parent
 		ingress := make([]policyk8sawsv1.ClusterEndpointInfo, 0, len(s.ingress))
 		for _, r := range s.ingress {
 			ingress = append(ingress, policyk8sawsv1.ClusterEndpointInfo{
@@ -257,7 +259,12 @@ func (fx *cpeFixture) identifierSlices(podIdentifier string) []string {
 	if !ok {
 		return nil
 	}
-	return v.([]string)
+	names := make([]string, 0, len(v.([]utils.TrackedPolicyEndpoint)))
+	for _, e := range v.([]utils.TrackedPolicyEndpoint) {
+		names = append(names, e.Name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // parentIdentifiers reports the identifiers the reconciler believes the parent policy
@@ -279,8 +286,9 @@ func (fx *cpeFixture) reconcile(name string) error {
 // reconcileDeleted drives the cleanup path the agent takes when a slice is gone from the
 // API server.
 func (fx *cpeFixture) reconcileDeleted(name string) error {
-	return fx.r.cleanUpClusterPolicyEndpoint(context.TODO(), controllerruntime.Request{
+	return fx.r.cleanUpClusterPolicyEndpoint(context.TODO(), ClusterPolicyEndpointRequest{
 		NamespacedName: types.NamespacedName{Name: name},
+		ParentCNP:      fx.sliceParents[name],
 	})
 }
 
@@ -358,6 +366,9 @@ type peFixture struct {
 	// namespace is still resolvable after deleteSlice removes the object.
 	store           map[string]policyk8sawsv1.PolicyEndpoint
 	sliceNamespaces map[string]string
+	// sliceParents mirrors what the watch handler records from Spec.PolicyRef.Name, and
+	// outlives store so the parent is still resolvable after deleteSlice.
+	sliceParents map[string]string
 }
 
 func newPEFixture(t *testing.T) *peFixture {
@@ -371,6 +382,7 @@ func newPEFixture(t *testing.T) *peFixture {
 		bpf:             &ebpf.MockBpfClient{},
 		store:           map[string]policyk8sawsv1.PolicyEndpoint{},
 		sliceNamespaces: map[string]string{},
+		sliceParents:    map[string]string{},
 	}
 	fx.r = NewPolicyEndpointsReconciler(mockClient, fixtureNodeIP, fx.bpf, false)
 
@@ -410,6 +422,7 @@ func (fx *peFixture) setSlices(specs ...sliceSpec) {
 	fx.store = map[string]policyk8sawsv1.PolicyEndpoint{}
 	for _, s := range specs {
 		fx.sliceNamespaces[s.name] = s.namespaceOrDefault()
+		fx.sliceParents[s.name] = s.parent
 		ingress := make([]policyk8sawsv1.EndpointInfo, 0, len(s.ingress))
 		for _, r := range s.ingress {
 			ingress = append(ingress, policyk8sawsv1.EndpointInfo{CIDR: policyk8sawsv1.NetworkAddress(r.cidr)})
@@ -455,7 +468,12 @@ func (fx *peFixture) identifierSlices(podIdentifier string) []string {
 	if !ok {
 		return nil
 	}
-	return v.([]string)
+	names := make([]string, 0, len(v.([]utils.TrackedPolicyEndpoint)))
+	for _, e := range v.([]utils.TrackedPolicyEndpoint) {
+		names = append(names, e.Name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // assertRulesCleared requires an actual map write with an empty rule set, since an absent
@@ -473,8 +491,9 @@ func (fx *peFixture) reconcile(name string) error {
 }
 
 func (fx *peFixture) reconcileDeleted(name string) error {
-	return fx.r.cleanUpPolicyEndpoint(context.TODO(), controllerruntime.Request{
+	return fx.r.cleanUpPolicyEndpoint(context.TODO(), PolicyEndpointRequest{
 		NamespacedName: types.NamespacedName{Name: name, Namespace: fx.sliceNamespaces[name]},
+		ParentNP:       fx.sliceParents[name],
 	})
 }
 
@@ -536,4 +555,18 @@ func (fx *peFixture) assertIdentifierAbsent(podIdentifier string) {
 	fx.t.Helper()
 	_, ok := fx.r.podIdentifierToPolicyEndpointMap.Load(podIdentifier)
 	assert.False(fx.t, ok, "podIdentifierToPolicyEndpointMap must not retain %s", podIdentifier)
+}
+
+// trackedPEs builds Map1 entries for tests that pre-seed the map directly. The parent is
+// derived from each name, which is lossless for the short names tests use and matches what
+// the reconciler computes from the object's Spec.PolicyRef.Name.
+func trackedPEs(names ...string) []utils.TrackedPolicyEndpoint {
+	entries := make([]utils.TrackedPolicyEndpoint, 0, len(names))
+	for _, name := range names {
+		entries = append(entries, utils.TrackedPolicyEndpoint{
+			ParentNP: utils.GetParentNPNameFromPEName(name),
+			Name:     name,
+		})
+	}
+	return entries
 }
