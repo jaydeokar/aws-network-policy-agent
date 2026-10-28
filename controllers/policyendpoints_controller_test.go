@@ -472,9 +472,13 @@ func TestPolicyEndpointReconcile_DeletingShardReconcilesSameParentMappings(t *te
 		wantBaselineRestore   bool
 	}{
 		{
-			name:                  "surviving shard still selects identifier prunes deleted shard name",
+			// The identifier stays selected via the surviving shard, so it never goes stale
+			// and the purge never visits it. With an append-only Map1 insert the deleted
+			// shard's name is therefore retained; see
+			// utils.UpdatePodIdentifierToPolicyEndpointMap.
+			name:                  "surviving shard still selects identifier retains deleted shard name",
 			survivingPodEndpoints: []policyendpoint.PodEndpoint{podEndpoint},
-			wantMAP1:              []string{survivingPEName},
+			wantMAP1:              []string{deletedPEName, survivingPEName},
 			wantMAP3:              true,
 		},
 		{
